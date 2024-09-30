@@ -43,8 +43,10 @@ except ImportError:
             subprocess.check_call([sys.executable, "-m", "pip", "install", "PyYAML"])
             import yaml
             print("'PyYAML' has been installed successfully.")
+            logging.info("'PyYAML' installed successfully.")
         except subprocess.CalledProcessError as e:
             print("Failed to install 'PyYAML'. Please install it manually and rerun the script.")
+            logging.error(f"Failed to install PyYAML: {e}")
             sys.exit(1)
     else:
         print("Cannot proceed without 'PyYAML'. Exiting.")
@@ -368,131 +370,131 @@ echo none > /sys/class/leds/green_led/trigger
 
 # Function to turn the LED on
 led_on() {
-  echo 1 > /sys/class/leds/green_led/brightness
+    echo 1 > /sys/class/leds/green_led/brightness
 }
 
 # Function to turn the LED off
 led_off() {
-  echo 0 > /sys/class/leds/green_led/brightness
+    echo 0 > /sys/class/leds/green_led/brightness
 }
 
 # Functions to represent blink durations
 blink_short() {  # Represents 'I' (1)
-  led_on
-  sleep 0.1
-  led_off
-  sleep 0.1
+    led_on
+    sleep 0.1
+    led_off
+    sleep 0.1
 }
 
 blink_medium() {  # Represents 'V' (5)
-  led_on
-  sleep 0.4
-  led_off
-  sleep 0.1
+    led_on
+    sleep 0.4
+    led_off
+    sleep 0.1
 }
 
 blink_long() {  # Represents 'X' (10) or 0
-  led_on
-  sleep 1.2
-  led_off
-  sleep 0.1
+    led_on
+    sleep 1.2
+    led_off
+    sleep 0.1
 }
 
 # Function to convert a digit to Roman numerals
 digit_to_roman() {
-  local n=$1
-  local result=""
+    local n=$1
+    local result=""
 
-  if [ $n -eq 0 ]; then
-    result="X"
-  elif [ $n -eq 4 ]; then
-    result="IIII"
-  elif [ $n -eq 9 ]; then
-    result="VIIII"
-  else
-    if [ $n -ge 5 ]; then
-      result="V"
-      n=$(( n - 5 ))
+    if [ $n -eq 0 ]; then
+        result="X"
+    elif [ $n -eq 4 ]; then
+        result="IIII"
+    elif [ $n -eq 9 ]; then
+        result="VIIII"
+    else
+        if [ $n -ge 5 ]; then
+            result="V"
+            n=$(( n - 5 ))
+        fi
+        if [ $n -ge 1 ]; then
+            result="${result}$(printf 'I%.0s' $(seq 1 $n))"
+        fi
     fi
-    if [ $n -ge 1 ]; then
-      result="${result}$(printf 'I%.0s' $(seq 1 $n))"
-    fi
-  fi
 
-  echo "$result"
+    echo "$result"
 }
 
 # Function to blink a digit
 blink_digit() {
-  local digit=$1
-  local roman=$(digit_to_roman $digit)
+    local digit=$1
+    local roman=$(digit_to_roman $digit)
 
-  for (( i=0; i<${#roman}; i++ )); do
-    c=${roman:$i:1}
-    if [ "$c" == "I" ]; then
-      blink_short
-    elif [ "$c" == "V" ]; then
-      blink_medium
-    elif [ "$c" == "X" ]; then
-      blink_long
-    fi
-  done
+    for (( i=0; i<${#roman}; i++ )); do
+        c=${roman:$i:1}
+        if [ "$c" == "I" ]; then
+            blink_short
+        elif [ "$c" == "V" ]; then
+            blink_medium
+        elif [ "$c" == "X" ]; then
+            blink_long
+        fi
+    done
 
-  # Wait 1 second between digits
-  sleep 1
+    # Wait 1 second between digits
+    sleep 1
 }
 
 # Function to blink the IP address
 blink_ip() {
-  for octet in "${digits[@]}"; do
-    # Break down the octet into individual digits
-    if [ $octet -ge 100 ]; then
-      digit1=$(( octet / 100 ))
-      digit2=$(( (octet % 100) / 10 ))
-      digit3=$(( octet % 10 ))
-      blink_digit $digit1
-      blink_digit $digit2
-      blink_digit $digit3
-    elif [ $octet -ge 10 ]; then
-      digit1=$(( octet / 10 ))
-      digit2=$(( octet % 10 ))
-      blink_digit $digit1
-      blink_digit $digit2
-    else
-      blink_digit $octet
-    fi
-  done
+    for octet in "${digits[@]}"; do
+        # Break down the octet into individual digits
+        if [ $octet -ge 100 ]; then
+            digit1=$(( octet / 100 ))
+            digit2=$(( (octet % 100) / 10 ))
+            digit3=$(( octet % 10 ))
+            blink_digit $digit1
+            blink_digit $digit2
+            blink_digit $digit3
+        elif [ $octet -ge 10 ]; then
+            digit1=$(( octet / 10 ))
+            digit2=$(( octet % 10 ))
+            blink_digit $digit1
+            blink_digit $digit2
+        else
+            blink_digit $octet
+        fi
+    done
 }
 
 # Get the default network interface
 default_iface=$(ip route | awk '/default/ {print $5}')
 if [ -z "$default_iface" ]; then
-  # No network interface found
-  digits=(0 0 0)
-else
-  # Get the IP address assigned to the default interface
-  ip_address=$(ip -o -4 addr list $default_iface | awk '{print $4}' | cut -d/ -f1)
-  if [ -z "$ip_address" ]; then
-    # No IP address assigned
+    # No network interface found
     digits=(0 0 0)
-  else
-    # Split the IP address into octets
-    IFS='.' read -r octet1 octet2 octet3 octet4 <<< "$ip_address"
-
-    # Decide which octets to blink
-    if [ "$octet3" == "0" ]; then
-      digits=($octet4)
+else
+    # Get the IP address assigned to the default interface
+    ip_address=$(ip -o -4 addr list $default_iface | awk '{print $4}' | cut -d/ -f1)
+    if [ -z "$ip_address" ]; then
+        # No IP address assigned
+        digits=(0 0 0)
     else
-      digits=($octet3 $octet4)
+        # Split the IP address into octets
+        IFS='.' read -r octet1 octet2 octet3 octet4 <<< "$ip_address"
+
+        # Decide which octets to blink
+        if [ "$octet3" == "0" ]; then
+            digits=($octet4)
+        else
+            digits=($octet3 $octet4)
+        fi
     fi
-  fi
 fi
 
 # Blink the IP address ten times
 for (( count=0; count<10; count++ )); do
-  blink_ip
-  # Wait 2 seconds between each complete IP blink sequence
-  sleep 2
+    blink_ip
+    # Wait 2 seconds between each complete IP blink sequence
+    sleep 2
 done
 
 # Set the trigger to "heartbeat" at the end
