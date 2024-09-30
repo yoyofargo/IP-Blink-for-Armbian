@@ -6,40 +6,12 @@ import subprocess
 import shutil
 import re
 import getpass
-import stat
 import logging
-from pathlib import Path
-
-# Attempt to import PyYAML, handle if not installed
-try:
-    import yaml
-except ImportError:
-    # PyYAML not installed, prompt user to install
-    print("PyYAML is not installed.")
-    install = input("Would you like to install it now? (Y/n): ").strip().lower()
-    if install in ['y', 'yes', '']:
-        try:
-            subprocess.check_call([sys.executable, "-m", "pip", "install", "PyYAML"])
-            import yaml
-            print("PyYAML installed successfully.")
-        except subprocess.CalledProcessError:
-            print("Failed to install PyYAML. Please install it manually and rerun the script.")
-            sys.exit(1)
-    else:
-        print("PyYAML is required to run this script. Please install it and rerun the script.")
-        sys.exit(1)
-
-# Configure logging
-script_name = os.path.splitext(os.path.basename(sys.argv[0]))[0]
-log_filename = f"{script_name}.log"
-logging.basicConfig(
-    filename=log_filename,
-    level=logging.INFO,
-    format='%(asctime)s - %(levelname)s - %(message)s',
-    filemode='a'  # Append mode
-)
+import importlib.util
 
 # Constants
+SCRIPT_NAME = os.path.basename(__file__)
+LOG_FILENAME = os.path.splitext(SCRIPT_NAME)[0] + '.log'
 MOUNT_POINT = '/mnt/orangepi_root'
 BACKUP_SUFFIX = '.bak'
 NETWORK_WAIT_OVERRIDE_DIR = 'etc/systemd/system/systemd-networkd-wait-online.service.d'
@@ -47,11 +19,36 @@ NETWORK_WAIT_OVERRIDE_FILE = 'override.conf'
 NETWORK_WAIT_TIMEOUT = '30'  # in seconds
 WIFI_INTERFACE = 'wlan0'  # Adjust as needed
 
+# Configure logging to append to the log file
+logging.basicConfig(
+    filename=LOG_FILENAME,
+    level=logging.INFO,
+    format='%(asctime)s - %(levelname)s - %(message)s',
+    filemode='a'  # Append to the log file
+)
+
 # Check for root privileges
 if os.geteuid() != 0:
     print("This script must be run as root. Please run with sudo.")
-    logging.error("Script not run as root.")
     sys.exit(1)
+
+# Check for PyYAML and handle installation
+try:
+    import yaml
+except ImportError:
+    print("The 'PyYAML' library is required to run this script.")
+    install_choice = input("Do you want to install 'PyYAML' now? (Y/n): ").strip().lower()
+    if install_choice in ['', 'y', 'yes']:
+        try:
+            subprocess.check_call([sys.executable, "-m", "pip", "install", "PyYAML"])
+            import yaml
+            print("'PyYAML' has been installed successfully.")
+        except subprocess.CalledProcessError as e:
+            print("Failed to install 'PyYAML'. Please install it manually and rerun the script.")
+            sys.exit(1)
+    else:
+        print("Cannot proceed without 'PyYAML'. Exiting.")
+        sys.exit(1)
 
 def prompt_input(prompt, allow_empty=False, validation_regex=None, error_message="Invalid input."):
     """
@@ -72,7 +69,6 @@ def prompt_input(prompt, allow_empty=False, validation_regex=None, error_message
             return value
         except KeyboardInterrupt:
             print("\nExiting.")
-            logging.info("Script exited by user.")
             sys.exit(0)
 
 def prompt_password(prompt):
@@ -90,7 +86,6 @@ def prompt_password(prompt):
             return pwd
         except KeyboardInterrupt:
             print("\nExiting.")
-            logging.info("Script exited by user.")
             sys.exit(0)
 
 def prompt_password_twice(prompt):
@@ -106,24 +101,8 @@ def prompt_password_twice(prompt):
             return 'back'
         if pwd1 != pwd2:
             print("Passwords do not match. Please try again.")
-            logging.warning("User entered mismatching passwords.")
             continue
         return pwd1
-
-def menu_select(options, prompt="Select an option:"):
-    """
-    Display a menu of options and prompt the user to select one.
-    """
-    for idx, option in enumerate(options, 1):
-        print(f"{idx}. {option}")
-    while True:
-        choice = input(prompt).strip()
-        if choice.lower() == 'back':
-            return 'back'
-        if choice.isdigit() and 1 <= int(choice) <= len(options):
-            return int(choice) - 1
-        else:
-            print(f"Please enter a number between 1 and {len(options)} or 'back' to return.")
 
 def detect_sd_card():
     """
@@ -151,7 +130,6 @@ def detect_sd_card():
 
     if not devices:
         print("No removable devices detected. Please insert the SD card and try again.")
-        logging.error("No removable devices detected.")
         sys.exit(1)
 
     print("Available devices:")
@@ -177,15 +155,12 @@ def mount_partitions(device):
     try:
         if not os.path.exists(mount_point):
             os.makedirs(mount_point)
-            logging.info(f"Created mount point directory: {mount_point}")
-
         # Check if the mount point is already mounted
         mount_output = subprocess.check_output(['mount'], universal_newlines=True)
         if any(mount_point in line for line in mount_output.strip().split('\n')):
             logging.info(f"{mount_point} is already mounted.")
             print(f"{mount_point} is already mounted.")
             return mount_point
-
         # Find the root partition (commonly last partition)
         lsblk = subprocess.check_output(['lsblk', '-ln', '-o', 'NAME,TYPE,MOUNTPOINT'], universal_newlines=True)
         partitions = []
@@ -227,7 +202,6 @@ def unmount_partitions(mount_point):
     logging.info(f"Unmounting {mount_point}")
     try:
         subprocess.run(['umount', mount_point], check=True)
-        logging.info(f"Successfully unmounted {mount_point}")
     except subprocess.CalledProcessError as e:
         logging.error(f"Failed to unmount {mount_point}: {e}")
         print(f"Failed to unmount {mount_point}. Please unmount it manually.")
@@ -266,31 +240,55 @@ def validate_wifi_password(password):
         return False
     return True
 
-def modify_netplan_config(mount_point, ssid, wifi_pwd):
+def create_network_wait_override(mount_point):
     """
-    Modify or create the Netplan configuration file with the provided WiFi settings.
+    Create an override for systemd-networkd-wait-online.service to wait only for WiFi.
     """
-    netplan_dir = Path(mount_point) / 'etc/netplan'
-    netplan_conf = netplan_dir / '30-wifis-dhcp.yaml'
+    override_dir = os.path.join(mount_point, NETWORK_WAIT_OVERRIDE_DIR)
+    override_file = os.path.join(override_dir, NETWORK_WAIT_OVERRIDE_FILE)
     try:
-        netplan_dir.mkdir(parents=True, exist_ok=True)
-        if netplan_conf.exists():
-            # Load existing configuration
-            with open(netplan_conf, 'r') as f:
-                config = yaml.safe_load(f) or {}
-            logging.info(f"Loaded existing Netplan configuration from {netplan_conf}")
+        os.makedirs(override_dir, exist_ok=True)
+        with open(override_file, 'w') as f:
+            f.write(f"""[Service]
+ExecStart=
+ExecStart=/usr/bin/systemd-networkd-wait-online --timeout={NETWORK_WAIT_TIMEOUT} --interface={WIFI_INTERFACE}
+""")
+        logging.info(f"Created systemd-networkd-wait-online.service override at {override_file}")
+        print("Modified systemd-networkd-wait-online.service to wait only for WiFi.")
+    except Exception as e:
+        logging.error(f"Failed to create network wait override: {e}")
+        print("Failed to create network wait override. Check logs for details.")
+        sys.exit(1)
+
+def update_netplan_configuration(netplan_conf_path, ssid, wifi_pwd):
+    """
+    Update the Netplan configuration file with the new WiFi settings.
+    """
+    try:
+        # Backup the existing Netplan configuration
+        backup_file(netplan_conf_path)
+
+        # Load existing configuration if it exists
+        if os.path.exists(netplan_conf_path):
+            with open(netplan_conf_path, 'r') as f:
+                netplan_config = yaml.safe_load(f)
         else:
-            config = {}
-            logging.info(f"Creating new Netplan configuration at {netplan_conf}")
+            netplan_config = {}
 
-        # Update Netplan configuration
-        config['network'] = config.get('network', {})
-        config['network']['version'] = 2
-        config['network']['renderer'] = 'networkd'
-        config['network']['wifis'] = config['network'].get('wifis', {})
+        # Initialize 'network' key if not present
+        if 'network' not in netplan_config:
+            netplan_config['network'] = {}
 
-        # Add or update wlan0 configuration
-        config['network']['wifis']['wlan0'] = {
+        # Set 'version' and 'renderer' if not present
+        netplan_config['network'].setdefault('version', 2)
+        netplan_config['network'].setdefault('renderer', 'networkd')
+
+        # Initialize 'wifis' key if not present
+        if 'wifis' not in netplan_config['network']:
+            netplan_config['network']['wifis'] = {}
+
+        # Configure the WiFi interface
+        wifi_interface_config = {
             'dhcp4': True,
             'access-points': {
                 ssid: {
@@ -299,25 +297,71 @@ def modify_netplan_config(mount_point, ssid, wifi_pwd):
             }
         }
 
+        # Merge or update the configuration for 'wlan0'
+        netplan_config['network']['wifis'][WIFI_INTERFACE] = wifi_interface_config
+
         # Write the updated configuration back to the file
-        with open(netplan_conf, 'w') as f:
-            yaml.dump(config, f, default_flow_style=False)
-        logging.info(f"Netplan configuration updated at {netplan_conf}")
+        with open(netplan_conf_path, 'w') as f:
+            yaml.safe_dump(netplan_config, f, default_flow_style=False)
+
+        logging.info(f"Updated Netplan configuration at {netplan_conf_path}")
         print("Netplan configuration updated successfully.")
+
     except Exception as e:
-        logging.error(f"Failed to modify Netplan configuration: {e}")
-        print("Failed to modify Netplan configuration. Check logs for details.")
+        logging.error(f"Failed to update Netplan configuration: {e}")
+        print("Failed to update Netplan configuration. Check logs for details.")
         sys.exit(1)
 
-def install_ip_blink_script(mount_point):
-    """
-    Install the ip_blink.sh script to /usr/local/bin/ and set appropriate permissions.
-    """
-    blink_script_path = Path(mount_point) / 'usr/local/bin/ip_blink.sh'
+def main():
+    print("Welcome to the Orange Pi Zero 2W IP Blink and WiFi Configurator")
+    logging.info("Script started.")
+
+    # Step 1: Detect and Mount SD Card
+    device = detect_sd_card()
+    mount_point = mount_partitions(device)
+
     try:
-        blink_script_dir = blink_script_path.parent
-        blink_script_dir.mkdir(parents=True, exist_ok=True)
-        blink_script_content = """#!/bin/bash
+        # Step 2: Collect WiFi SSID and Password
+        inputs = {}
+        while True:
+            ssid = prompt_input(
+                "Enter WiFi SSID: ",
+                validation_regex=r'^[^\'"]+$',
+                error_message="SSID cannot contain quotes."
+            )
+            if ssid == 'back':
+                print("Cannot go back from the first step.")
+                continue
+            if not validate_wifi_ssid(ssid):
+                print("SSID contains invalid characters.")
+                continue
+            inputs['ssid'] = ssid
+            break
+
+        while True:
+            wifi_pwd = prompt_password_twice("Enter WiFi Password: ")
+            if wifi_pwd == 'back':
+                # Allow going back to re-enter SSID
+                print("To re-enter SSID, please restart the script.")
+                continue
+            if not validate_wifi_password(wifi_pwd):
+                print("Password contains invalid characters.")
+                continue
+            inputs['wifi_pwd'] = wifi_pwd
+            break
+
+        # Step 3: Update Netplan Configuration
+        netplan_dir = os.path.join(mount_point, 'etc', 'netplan')
+        os.makedirs(netplan_dir, exist_ok=True)
+        netplan_conf = os.path.join(netplan_dir, '30-wifis-dhcp.yaml')
+        update_netplan_configuration(netplan_conf, inputs['ssid'], inputs['wifi_pwd'])
+
+        # Step 4: Install ip_blink.sh Script
+        blink_script_path = os.path.join(mount_point, 'usr', 'local', 'bin', 'ip_blink.sh')
+        try:
+            os.makedirs(os.path.dirname(blink_script_path), exist_ok=True)
+            with open(blink_script_path, 'w') as f:
+                f.write("""#!/bin/bash
 
 # Disable the default trigger for the green LED
 echo none > /sys/class/leds/green_led/trigger
@@ -453,21 +497,21 @@ done
 
 # Set the trigger to "heartbeat" at the end
 echo "heartbeat" > /sys/class/leds/green_led/trigger
-"""
-        with open(blink_script_path, 'w') as f:
-            f.write(blink_script_content)
-        blink_script_path.chmod(0o750)
-        logging.info(f"Installed ip_blink.sh script at {blink_script_path}")
-        print("ip_blink.sh script installed successfully.")
+""")
+            os.chmod(blink_script_path, 0o750)
+            logging.info(f"Installed ip_blink.sh script at {blink_script_path}")
+            print("ip_blink.sh script installed successfully.")
 
-def create_systemd_service(mount_point):
-    """
-    Create the systemd service file for ipblink.service.
-    """
-    service_file = Path(mount_point) / 'etc/systemd/system/ipblink.service'
-    try:
-        with open(service_file, 'w') as f:
-            f.write("""[Unit]
+        except Exception as e:
+            logging.error(f"Failed to install ip_blink.sh: {e}")
+            print("Failed to install ip_blink.sh. Check logs for details.")
+            sys.exit(1)
+
+        # Step 5: Create systemd Service
+        service_file = os.path.join(mount_point, 'etc', 'systemd', 'system', 'ipblink.service')
+        try:
+            with open(service_file, 'w') as f:
+                f.write("""[Unit]
 Description=Blink IP address on green LED
 After=network-online.target
 Wants=network-online.target
@@ -483,106 +527,38 @@ PrivateTmp=true
 [Install]
 WantedBy=multi-user.target
 """)
-        logging.info(f"Created systemd service at {service_file}")
-        print("Systemd service file created successfully.")
-    except Exception as e:
-        logging.error(f"Failed to create systemd service: {e}")
-        print("Failed to create systemd service. Check logs for details.")
-        sys.exit(1)
-
-def enable_systemd_service(mount_point):
-    """
-    Enable the systemd service to run on boot by creating a symlink.
-    """
-    try:
-        wants_dir = Path(mount_point) / 'etc/systemd/system/multi-user.target.wants'
-        wants_dir.mkdir(parents=True, exist_ok=True)
-        service_symlink = wants_dir / 'ipblink.service'
-        service_path = '/etc/systemd/system/ipblink.service'
-        if not service_symlink.exists():
-            service_symlink.symlink_to(service_path)
-            logging.info(f"Enabled ipblink.service by creating symlink at {service_symlink}")
-            print("Systemd service enabled to run on boot.")
-        else:
-            logging.info("Systemd service symlink already exists.")
-    except Exception as e:
-        logging.error(f"Failed to enable systemd service: {e}")
-        print("Failed to enable systemd service. Check logs for details.")
-        sys.exit(1)
-
-def modify_network_wait_override(mount_point):
-    """
-    Modify systemd-networkd-wait-online.service to wait only for WiFi.
-    """
-    override_dir = Path(mount_point) / NETWORK_WAIT_OVERRIDE_DIR
-    override_file = override_dir / NETWORK_WAIT_OVERRIDE_FILE
-    try:
-        override_dir.mkdir(parents=True, exist_ok=True)
-        override_content = f"""[Service]
-ExecStart=
-ExecStart=/usr/bin/systemd-networkd-wait-online --timeout={NETWORK_WAIT_TIMEOUT} --interface={WIFI_INTERFACE}
-"""
-        with open(override_file, 'w') as f:
-            f.write(override_content)
-        logging.info(f"Created systemd-networkd-wait-online.service override at {override_file}")
-        print("Modified systemd-networkd-wait-online.service to wait only for WiFi.")
-    except Exception as e:
-        logging.error(f"Failed to create network wait override: {e}")
-        print("Failed to create network wait override. Check logs for details.")
-        sys.exit(1)
-
-def main():
-    print("Welcome to the Orange Pi Zero 2W IP Blink and WiFi Configurator")
-    logging.info("Script started.")
-
-    # Step 1: Detect and Mount SD Card
-    device = detect_sd_card()
-    mount_point = mount_partitions(device)
-
-    try:
-        # Step 2: Collect WiFi SSID and Password
-        inputs = {}
-        while True:
-            ssid = prompt_input(
-                "Enter WiFi SSID: ",
-                validation_regex=r'^[^\'"]+$',
-                error_message="SSID cannot contain quotes."
-            )
-            if ssid == 'back':
-                print("Cannot go back from the first step.")
-                continue
-            if not validate_wifi_ssid(ssid):
-                print("SSID contains invalid characters.")
-                continue
-            inputs['ssid'] = ssid
-            break
-
-        while True:
-            wifi_pwd = prompt_password_twice("Enter WiFi Password: ")
-            if wifi_pwd == 'back':
-                # Allow going back to re-enter SSID
-                print("To re-enter SSID, please restart the script.")
-                continue
-            if not validate_wifi_password(wifi_pwd):
-                print("Password contains invalid characters.")
-                continue
-            inputs['wifi_pwd'] = wifi_pwd
-            break
-
-        # Step 3: Configure Netplan
-        modify_netplan_config(mount_point, inputs['ssid'], inputs['wifi_pwd'])
-
-        # Step 4: Install ip_blink.sh Script
-        install_ip_blink_script(mount_point)
-
-        # Step 5: Create systemd Service
-        create_systemd_service(mount_point)
+            logging.info(f"Created systemd service at {service_file}")
+            print("Systemd service file created successfully.")
+        except Exception as e:
+            logging.error(f"Failed to create systemd service: {e}")
+            print("Failed to create systemd service. Check logs for details.")
+            sys.exit(1)
 
         # Step 6: Enable the systemd Service
-        enable_systemd_service(mount_point)
+        try:
+            wants_dir = os.path.join(mount_point, 'etc', 'systemd', 'system', 'multi-user.target.wants')
+            os.makedirs(wants_dir, exist_ok=True)
+            service_symlink = os.path.join(wants_dir, 'ipblink.service')
+            if not os.path.exists(service_symlink):
+                os.symlink('/etc/systemd/system/ipblink.service', service_symlink)
+                logging.info(f"Enabled ipblink.service by creating symlink at {service_symlink}")
+                print("Systemd service enabled to run on boot.")
+            else:
+                logging.info("Systemd service symlink already exists.")
+        except Exception as e:
+            logging.error(f"Failed to enable systemd service: {e}")
+            print("Failed to enable systemd service. Check logs for details.")
+            sys.exit(1)
 
         # Step 7: Modify systemd-networkd-wait-online.service to only wait for WiFi
-        modify_network_wait_override(mount_point)
+        try:
+            create_network_wait_override(mount_point)
+            logging.info("Modified systemd-networkd-wait-online.service to wait only for WiFi.")
+            print("Configured systemd-networkd-wait-online.service to wait only for WiFi interfaces.")
+        except Exception as e:
+            logging.error(f"Failed to modify network wait-online service: {e}")
+            print("Failed to modify network wait-online service. Check logs for details.")
+            sys.exit(1)
 
     finally:
         # Cleanup: Unmount the SD card
