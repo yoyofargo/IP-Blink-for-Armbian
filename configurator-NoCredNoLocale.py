@@ -246,6 +246,7 @@ ExecStart=/usr/bin/systemd-networkd-wait-online --timeout={NETWORK_WAIT_TIMEOUT}
 def update_netplan_configuration(netplan_conf_path, ssid, wifi_pwd):
     """
     Update the Netplan configuration file with the new WiFi settings by directly editing strings.
+    Ensures no duplicate SSIDs and maintains proper indentation.
     """
     try:
         # Backup the existing Netplan configuration
@@ -257,74 +258,136 @@ def update_netplan_configuration(netplan_conf_path, ssid, wifi_pwd):
         else:
             lines = []
 
-        # Flags to check if 'wifis' and 'wlan0' sections exist
-        wifis_found = False
-        wlan0_found = False
+        # Initialize variables to track positions
+        network_section_found = False
+        wifis_section_found = False
+        wlan0_section_found = False
+        ssid_found = False
+        ssid_line_index = -1
+        password_line_index = -1
 
-        # New configuration lines to add or replace
-        new_wlan0_config = [
-            f"  {WIFI_INTERFACE}:\n",
-            f"    dhcp4: true\n",
-            f"    access-points:\n",
-            f"      \"{ssid}\":\n",
-            f"        password: \"{wifi_pwd}\"\n"
-        ]
-
-        # Iterate through lines to find and modify the 'wifis' section
+        # Iterate through lines to find relevant sections
         for idx, line in enumerate(lines):
-            if re.match(r'^\s*wifis:', line):
-                wifis_found = True
-                # Look for 'wlan0' under 'wifis'
-                for j in range(idx + 1, len(lines)):
-                    if re.match(r'^\s+\S+:', lines[j]):
-                        interface_match = re.match(r'^\s+(\S+):', lines[j])
-                        if interface_match:
-                            interface = interface_match.group(1)
-                            if interface == WIFI_INTERFACE:
-                                wlan0_found = True
-                                # Replace existing wlan0 configuration
-                                # Find the start and end of the wlan0 block
-                                start = j
-                                end = j + 1
-                                for k in range(j + 1, len(lines)):
-                                    if re.match(r'^\s+\S+:', lines[k]):
-                                        end = k
-                                        break
-                                # Replace the wlan0 block with new configuration
-                                lines[start:end] = new_wlan0_config
-                                logging.info(f"Updated existing wlan0 configuration in {netplan_conf_path}")
-                                print("Updated existing wlan0 configuration in Netplan.")
-                                break
-                break
+            # Check for 'network:' section
+            if re.match(r'^\s*network:', line):
+                network_section_found = True
+                continue
 
-        if not wifis_found:
-            # If 'wifis' section does not exist, add it
-            lines.append("wifis:\n")
-            lines.extend(new_wlan0_config)
-            logging.info(f"Added new wifis section with wlan0 configuration in {netplan_conf_path}")
-            print("Added new wifis section with wlan0 configuration in Netplan.")
-        elif not wlan0_found:
-            # If 'wlan0' section does not exist under 'wifis', add it
-            # Find the end of 'wifis' section
+            # Check for 'wifis:' section under 'network:'
+            if network_section_found and re.match(r'^\s*wifis:', line):
+                wifis_section_found = True
+                continue
+
+            # Check for 'wlan0:' section under 'wifis:'
+            if wifis_section_found and re.match(r'^\s+' + re.escape(WIFI_INTERFACE) + r':', line):
+                wlan0_section_found = True
+                continue
+
+            # If within 'wlan0:' section, look for existing SSID
+            if wlan0_section_found and re.match(r'^\s+access-points:', line):
+                # Look ahead for SSID
+                for j in range(idx + 1, len(lines)):
+                    ssid_match = re.match(r'^\s+"([^"]+)":', lines[j])
+                    if ssid_match:
+                        existing_ssid = ssid_match.group(1)
+                        if existing_ssid == ssid:
+                            ssid_found = True
+                            ssid_line_index = j
+                            # The password line should be the next line
+                            if j + 1 < len(lines):
+                                password_line = lines[j + 1]
+                                password_match = re.match(r'^\s+password:\s+"([^"]+)"', password_line)
+                                if password_match:
+                                    password_line_index = j + 1
+                            break
+                    # Break if we reach another access point or end of 'wlan0:' section
+                    elif re.match(r'^\s+"\S+":', lines[j]):
+                        break
+                break  # No need to continue after processing access-points
+
+        if not network_section_found:
+            # Add 'network:' section at the beginning
+            lines.insert(0, "network:\n")
+            network_section_found = True
+            logging.info(f"Added 'network:' section to {netplan_conf_path}")
+
+        if not wifis_section_found:
+            # Add 'wifis:' section under 'network:'
+            for idx, line in enumerate(lines):
+                if re.match(r'^\s*network:', line):
+                    insertion_idx = idx + 1
+                    break
+            lines.insert(insertion_idx, "  wifis:\n")
+            wifis_section_found = True
+            logging.info(f"Added 'wifis:' section to {netplan_conf_path}")
+
+        if not wlan0_section_found:
+            # Add 'wlan0:' section under 'wifis:'
             for idx, line in enumerate(lines):
                 if re.match(r'^\s*wifis:', line):
                     insertion_idx = idx + 1
                     break
-            lines[insertion_idx:insertion_idx] = new_wlan0_config
-            logging.info(f"Added new wlan0 configuration under existing wifis section in {netplan_conf_path}")
-            print("Added new wlan0 configuration under existing wifis section in Netplan.")
+            wlan0_config = [
+                f"    {WIFI_INTERFACE}:\n",
+                f"      dhcp4: true\n",
+                f"      access-points:\n"
+            ]
+            lines[insertion_idx:insertion_idx] = wlan0_config
+            wlan0_section_found = True
+            logging.info(f"Added '{WIFI_INTERFACE}:' section to {netplan_conf_path}")
+
+        if ssid_found:
+            # Update the password if it differs
+            if password_line_index != -1:
+                current_password = re.match(r'^\s+password:\s+"([^"]+)"', lines[password_line_index]).group(1)
+                if current_password != wifi_pwd:
+                    lines[password_line_index] = f'        password: "{wifi_pwd}"\n'
+                    logging.info(f"Updated password for SSID '{ssid}' in {netplan_conf_path}")
+                    print(f"Updated password for SSID '{ssid}' in Netplan.")
+                else:
+                    logging.info(f"SSID '{ssid}' already exists with the provided password. No changes made.")
+                    print(f"SSID '{ssid}' already exists with the provided password. No changes made.")
+            else:
+                # Password line not found; append it
+                insertion_idx = ssid_line_index + 1
+                lines.insert(insertion_idx, f'        password: "{wifi_pwd}"\n')
+                logging.info(f"Added password for SSID '{ssid}' in {netplan_conf_path}")
+                print(f"Added password for SSID '{ssid}' in Netplan.")
+        else:
+            # Add new SSID and password
+            # Find the end of the 'access-points:' section
+            insertion_idx = -1
+            for idx, line in enumerate(lines):
+                if re.match(r'^\s+access-points:', line):
+                    insertion_idx = idx + 1
+                    break
+            if insertion_idx == -1:
+                # 'access-points:' not found; append under 'wlan0:'
+                for idx, line in enumerate(lines):
+                    if re.match(r'^\s+' + re.escape(WIFI_INTERFACE) + r':', line):
+                        insertion_idx = idx + 1
+                        break
+                if insertion_idx == -1:
+                    logging.error("Failed to locate 'wlan0:' section for adding access points.")
+                    print("Failed to locate 'wlan0:' section for adding access points.")
+                    sys.exit(1)
+                lines.insert(insertion_idx, "      access-points:\n")
+                insertion_idx += 1
+            # Add the new SSID and password
+            ssid_config = [
+                f'        "{ssid}":\n',
+                f'          password: "{wifi_pwd}"\n'
+            ]
+            lines[insertion_idx:insertion_idx] = ssid_config
+            logging.info(f"Added new SSID '{ssid}' with provided password to {netplan_conf_path}")
+            print(f"Added new SSID '{ssid}' with provided password to Netplan.")
 
         # Write the updated configuration back to the file
         with open(netplan_conf_path, 'w') as f:
             f.writelines(lines)
 
-        logging.info(f"Updated Netplan configuration at {netplan_conf_path}")
+        logging.info(f"Netplan configuration updated at {netplan_conf_path}")
         print("Netplan configuration updated successfully.")
-
-    except Exception as e:
-        logging.error(f"Failed to update Netplan configuration: {e}")
-        print("Failed to update Netplan configuration. Check logs for details.")
-        sys.exit(1)
 
 def enable_systemd_service(mount_point):
     """
@@ -335,17 +398,18 @@ def enable_systemd_service(mount_point):
         wants_dir = os.path.join(mount_point, 'etc', 'systemd', 'system', 'multi-user.target.wants')
         os.makedirs(wants_dir, exist_ok=True)
         service_symlink = os.path.join(wants_dir, 'ipblink.service')
-        target_service = '/etc/systemd/system/ipblink.service'
+        # Relative target path from multi-user.target.wants to the service file
+        relative_target = '../../ipblink.service'
 
         if os.path.islink(service_symlink):
             existing_target = os.readlink(service_symlink)
-            if existing_target == target_service:
+            if existing_target == relative_target:
                 logging.info("systemd service symlink already exists and points to the correct target.")
                 print("Systemd service symlink already exists and is correctly configured.")
             else:
                 logging.warning(f"systemd service symlink points to {existing_target}. Recreating symlink.")
                 os.remove(service_symlink)
-                os.symlink(target_service, service_symlink)
+                os.symlink(relative_target, service_symlink)
                 logging.info("systemd service symlink recreated successfully.")
                 print("systemd service symlink was incorrect and has been recreated.")
         elif os.path.exists(service_symlink):
@@ -353,12 +417,12 @@ def enable_systemd_service(mount_point):
             backup_path = service_symlink + BACKUP_SUFFIX
             shutil.move(service_symlink, backup_path)
             logging.warning(f"Existing file {service_symlink} moved to backup {backup_path}.")
-            os.symlink(target_service, service_symlink)
+            os.symlink(relative_target, service_symlink)
             logging.info("systemd service symlink created successfully after backing up existing file.")
             print(f"Existing file {service_symlink} was backed up and symlink created successfully.")
         else:
             # Symlink does not exist; create it.
-            os.symlink(target_service, service_symlink)
+            os.symlink(relative_target, service_symlink)
             logging.info("systemd service symlink created successfully.")
             print("Systemd service enabled to run on boot.")
 
