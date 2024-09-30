@@ -260,7 +260,6 @@ def update_netplan_configuration(netplan_conf_path, ssid, wifi_pwd):
         # Flags to check if 'wifis' and 'wlan0' sections exist
         wifis_found = False
         wlan0_found = False
-        access_points_found = False
 
         # New configuration lines to add or replace
         new_wlan0_config = [
@@ -325,6 +324,55 @@ def update_netplan_configuration(netplan_conf_path, ssid, wifi_pwd):
     except Exception as e:
         logging.error(f"Failed to update Netplan configuration: {e}")
         print("Failed to update Netplan configuration. Check logs for details.")
+        sys.exit(1)
+
+def enable_systemd_service(mount_point):
+    """
+    Enable the ipblink.service by creating a symbolic link in multi-user.target.wants.
+    Handles existing symlinks or files gracefully.
+    """
+    try:
+        wants_dir = os.path.join(mount_point, 'etc', 'systemd', 'system', 'multi-user.target.wants')
+        os.makedirs(wants_dir, exist_ok=True)
+        service_symlink = os.path.join(wants_dir, 'ipblink.service')
+        target_service = '/etc/systemd/system/ipblink.service'
+
+        if os.path.islink(service_symlink):
+            existing_target = os.readlink(service_symlink)
+            if existing_target == target_service:
+                logging.info("systemd service symlink already exists and points to the correct target.")
+                print("Systemd service symlink already exists and is correctly configured.")
+            else:
+                logging.warning(f"systemd service symlink points to {existing_target}. Recreating symlink.")
+                os.remove(service_symlink)
+                os.symlink(target_service, service_symlink)
+                logging.info("systemd service symlink recreated successfully.")
+                print("systemd service symlink was incorrect and has been recreated.")
+        elif os.path.exists(service_symlink):
+            # It's a file, not a symlink. Backup and create symlink.
+            backup_path = service_symlink + BACKUP_SUFFIX
+            shutil.move(service_symlink, backup_path)
+            logging.warning(f"Existing file {service_symlink} moved to backup {backup_path}.")
+            os.symlink(target_service, service_symlink)
+            logging.info("systemd service symlink created successfully after backing up existing file.")
+            print(f"Existing file {service_symlink} was backed up and symlink created successfully.")
+        else:
+            # Symlink does not exist; create it.
+            os.symlink(target_service, service_symlink)
+            logging.info("systemd service symlink created successfully.")
+            print("Systemd service enabled to run on boot.")
+
+    except PermissionError as e:
+        logging.error(f"Permission denied while creating symlink: {e}")
+        print("Permission denied while enabling systemd service. Please check permissions.")
+        sys.exit(1)
+    except FileExistsError as e:
+        logging.error(f"Failed to create symlink because it already exists: {e}")
+        print("Failed to enable systemd service because the symlink already exists.")
+        sys.exit(1)
+    except Exception as e:
+        logging.error(f"Failed to enable systemd service: {e}")
+        print("Failed to enable systemd service. Check logs for details.")
         sys.exit(1)
 
 def main():
@@ -549,23 +597,8 @@ WantedBy=multi-user.target
             print("Failed to create systemd service. Check logs for details.")
             sys.exit(1)
 
-        # Step 6: Enable the systemd Service
-        try:
-            wants_dir = os.path.join(mount_point, 'etc', 'systemd', 'system', 'multi-user.target.wants')
-            os.makedirs(wants_dir, exist_ok=True)
-            service_symlink = os.path.join(wants_dir, 'ipblink.service')
-            if not os.path.exists(service_symlink):
-                # The target of the symlink should be relative to the mounted filesystem
-                relative_target = '/etc/systemd/system/ipblink.service'
-                os.symlink(relative_target, service_symlink)
-                logging.info(f"Enabled ipblink.service by creating symlink at {service_symlink}")
-                print("Systemd service enabled to run on boot.")
-            else:
-                logging.info("Systemd service symlink already exists.")
-        except Exception as e:
-            logging.error(f"Failed to enable systemd service: {e}")
-            print("Failed to enable systemd service. Check logs for details.")
-            sys.exit(1)
+        # Step 6: Enable the systemd Service with Enhanced Handling
+        enable_systemd_service(mount_point)
 
         # Step 7: Modify systemd-networkd-wait-online.service to only wait for WiFi
         try:
