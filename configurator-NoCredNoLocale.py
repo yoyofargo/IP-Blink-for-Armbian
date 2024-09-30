@@ -317,6 +317,8 @@ def update_netplan_configuration(netplan_conf_path, ssid, wifi_pwd):
                 if re.match(r'^\s*network:', line):
                     insertion_idx = idx + 1
                     break
+            else:
+                insertion_idx = len(lines)
             lines.insert(insertion_idx, "  wifis:\n")
             wifis_section_found = True
             logging.info(f"Added 'wifis:' section to {netplan_conf_path}")
@@ -327,6 +329,8 @@ def update_netplan_configuration(netplan_conf_path, ssid, wifi_pwd):
                 if re.match(r'^\s*wifis:', line):
                     insertion_idx = idx + 1
                     break
+            else:
+                insertion_idx = len(lines)
             wlan0_config = [
                 f"    {WIFI_INTERFACE}:\n",
                 f"      dhcp4: true\n",
@@ -341,7 +345,7 @@ def update_netplan_configuration(netplan_conf_path, ssid, wifi_pwd):
             if password_line_index != -1:
                 current_password = re.match(r'^\s+password:\s+"([^"]+)"', lines[password_line_index]).group(1)
                 if current_password != wifi_pwd:
-                    lines[password_line_index] = f'        password: "{wifi_pwd}"\n'
+                    lines[password_line_index] = f'          password: "{wifi_pwd}"\n'
                     logging.info(f"Updated password for SSID '{ssid}' in {netplan_conf_path}")
                     print(f"Updated password for SSID '{ssid}' in Netplan.")
                 else:
@@ -350,7 +354,7 @@ def update_netplan_configuration(netplan_conf_path, ssid, wifi_pwd):
             else:
                 # Password line not found; append it
                 insertion_idx = ssid_line_index + 1
-                lines.insert(insertion_idx, f'        password: "{wifi_pwd}"\n')
+                lines.insert(insertion_idx, f'          password: "{wifi_pwd}"\n')
                 logging.info(f"Added password for SSID '{ssid}' in {netplan_conf_path}")
                 print(f"Added password for SSID '{ssid}' in Netplan.")
         else:
@@ -388,6 +392,11 @@ def update_netplan_configuration(netplan_conf_path, ssid, wifi_pwd):
 
         logging.info(f"Netplan configuration updated at {netplan_conf_path}")
         print("Netplan configuration updated successfully.")
+
+    except Exception as e:
+        logging.error(f"Failed to update Netplan configuration: {e}")
+        print("Failed to update Netplan configuration. Check logs for details.")
+        sys.exit(1)
 
 def enable_systemd_service(mount_point):
     """
