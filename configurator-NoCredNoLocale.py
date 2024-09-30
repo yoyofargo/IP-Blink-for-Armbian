@@ -19,6 +19,10 @@ logging.basicConfig(
 # Constants
 MOUNT_POINT = '/mnt/orangepi_root'
 BACKUP_SUFFIX = '.bak'
+NETWORK_WAIT_OVERRIDE_DIR = 'etc/systemd/system/systemd-networkd-wait-online.service.d'
+NETWORK_WAIT_OVERRIDE_FILE = 'override.conf'
+NETWORK_WAIT_TIMEOUT = '30'  # in seconds
+WIFI_INTERFACE = 'wlan0'  # Adjust as needed
 
 # Check for root privileges
 if os.geteuid() != 0:
@@ -193,6 +197,25 @@ def modify_file_safely(original_path, modify_func):
     except Exception as e:
         logging.error(f"Error modifying {original_path}: {e}")
         print(f"Failed to modify {original_path}. Check logs for details.")
+        sys.exit(1)
+
+def create_network_wait_override(mount_point):
+    """
+    Create an override for systemd-networkd-wait-online.service to wait only for WiFi.
+    """
+    override_dir = os.path.join(mount_point, NETWORK_WAIT_OVERRIDE_DIR)
+    override_file = os.path.join(override_dir, NETWORK_WAIT_OVERRIDE_FILE)
+    try:
+        os.makedirs(override_dir, exist_ok=True)
+        with open(override_file, 'w') as f:
+            f.write(f"""[Service]
+ExecStart=
+ExecStart=/usr/bin/systemd-networkd-wait-online --timeout={NETWORK_WAIT_TIMEOUT} --interface={WIFI_INTERFACE}
+""")
+        logging.info(f"Created systemd-networkd-wait-online.service override at {override_file}")
+    except Exception as e:
+        logging.error(f"Failed to create network wait override: {e}")
+        print("Failed to create network wait override. Check logs for details.")
         sys.exit(1)
 
 def main():
@@ -469,12 +492,15 @@ WantedBy=multi-user.target
             print("Failed to enable systemd service. Check logs for details.")
             sys.exit(1)
 
-        # Step 7: Ensure Correct Permissions for ip_blink.sh
+        # Step 7: Modify systemd-networkd-wait-online.service to only wait for WiFi
         try:
-            os.chmod(blink_script_path, 0o750)
-            logging.info(f"Set correct permissions for {blink_script_path}")
+            create_network_wait_override(mount_point)
+            logging.info("Modified systemd-networkd-wait-online.service to wait only for WiFi.")
+            print("Configured systemd-networkd-wait-online.service to wait only for WiFi interfaces.")
         except Exception as e:
-            logging.warning(f"Failed to set permissions for {blink_script_path}: {e}")
+            logging.error(f"Failed to modify network wait-online service: {e}")
+            print("Failed to modify network wait-online service. Check logs for details.")
+            sys.exit(1)
 
     finally:
         # Cleanup: Unmount the SD card
