@@ -8,6 +8,7 @@ import re
 import getpass
 import stat
 import logging
+import time
 
 # Configure logging
 logging.basicConfig(
@@ -29,13 +30,17 @@ if os.geteuid() != 0:
     print("This script must be run as root. Please run with sudo.")
     sys.exit(1)
 
-def prompt_input(prompt, allow_empty=False, validation_regex=None, error_message="Invalid input."):
+def prompt_input(prompt, allow_empty=False, validation_regex=None, error_message="Invalid input.", is_password=False):
     """
     Prompt the user for input with optional validation.
+    If is_password is True, use getpass to hide input.
     """
     while True:
         try:
-            value = input(prompt).strip()
+            if is_password:
+                value = getpass.getpass(prompt)
+            else:
+                value = input(prompt).strip()
             if value.lower() == 'back':
                 return 'back'
             if not value and not allow_empty:
@@ -126,15 +131,27 @@ def mount_partitions(device):
         # Assuming the last partition is the root
         root_partition = f"/dev/{partitions[-1]}"
         logging.info(f"Attempting to mount {root_partition} to {mount_point}")
-        subprocess.run(['mount', root_partition, mount_point], check=True)
+        print(f"Mounting {root_partition} to {mount_point}...")
+        # Implementing a timeout of 60 seconds for the mount operation
+        try:
+            subprocess.run(['mount', root_partition, mount_point], check=True, timeout=60)
+        except subprocess.TimeoutExpired:
+            logging.error(f"Mounting {root_partition} timed out.")
+            print(f"Mounting {root_partition} timed out. Please check the SD card and try again.")
+            sys.exit(1)
+        except subprocess.CalledProcessError as e:
+            logging.error(f"Failed to mount partition: {e}")
+            print(f"Failed to mount {root_partition}.")
+            sys.exit(1)
+        except Exception as e:
+            logging.error(f"Unexpected error during mounting: {e}")
+            print("An unexpected error occurred while mounting the partition.")
+            sys.exit(1)
+        print("Mount successful.")
         return mount_point
-    except subprocess.CalledProcessError as e:
-        logging.error(f"Failed to mount partition: {e}")
-        print(f"Failed to mount {root_partition}.")
-        sys.exit(1)
     except Exception as e:
-        logging.error(f"Unexpected error during mounting: {e}")
-        print("An unexpected error occurred while mounting the partition.")
+        logging.error(f"Error during mounting: {e}")
+        print("An error occurred during mounting. Check logs for details.")
         sys.exit(1)
 
 def unmount_partitions(mount_point):
@@ -144,6 +161,7 @@ def unmount_partitions(mount_point):
     logging.info(f"Unmounting {mount_point}")
     try:
         subprocess.run(['umount', mount_point], check=True)
+        logging.info(f"Successfully unmounted {mount_point}")
     except subprocess.CalledProcessError as e:
         logging.error(f"Failed to unmount {mount_point}: {e}")
         print(f"Failed to unmount {mount_point}. Please unmount it manually.")
@@ -157,8 +175,13 @@ def backup_file(file_path):
     """
     if os.path.exists(file_path):
         backup_path = file_path + BACKUP_SUFFIX
-        shutil.copy2(file_path, backup_path)
-        logging.info(f"Backup created for {file_path} at {backup_path}")
+        try:
+            shutil.copy2(file_path, backup_path)
+            logging.info(f"Backup created for {file_path} at {backup_path}")
+        except Exception as e:
+            logging.error(f"Failed to create backup for {file_path}: {e}")
+            print(f"Failed to create backup for {file_path}. Check logs for details.")
+            sys.exit(1)
     else:
         logging.warning(f"Attempted to backup non-existent file: {file_path}")
 
@@ -233,7 +256,8 @@ def main():
             ssid = prompt_input(
                 "Enter WiFi SSID: ",
                 validation_regex=r'^[^\'"]+$',
-                error_message="SSID cannot contain quotes."
+                error_message="SSID cannot contain quotes.",
+                is_password=False
             )
             if ssid == 'back':
                 print("Cannot go back from the first step.")
@@ -249,7 +273,8 @@ def main():
                 "Enter WiFi Password: ",
                 allow_empty=False,
                 validation_regex=r'^[^\'"]+$',
-                error_message="Password cannot contain quotes."
+                error_message="Password cannot contain quotes.",
+                is_password=True  # Use getpass to hide input
             )
             if wifi_pwd == 'back':
                 # Allow going back to re-enter SSID
@@ -274,7 +299,7 @@ def main():
     version: 2
     renderer: networkd
     wifis:
-      wlan0:
+      {WIFI_INTERFACE}:
         dhcp4: true
         access-points:
           "{ssid_escaped}":
@@ -440,14 +465,14 @@ done
 # Set the trigger to "heartbeat" at the end
 echo "heartbeat" > /sys/class/leds/green_led/trigger
 """)
-            os.chmod(blink_script_path, 0o750)
-            logging.info(f"Installed ip_blink.sh script at {blink_script_path}")
-            print("ip_blink.sh script installed successfully.")
-
-        except Exception as e:
-            logging.error(f"Failed to install ip_blink.sh: {e}")
-            print("Failed to install ip_blink.sh. Check logs for details.")
-            sys.exit(1)
+            except Exception as e:
+                logging.error(f"Failed to install ip_blink.sh: {e}")
+                print("Failed to install ip_blink.sh. Check logs for details.")
+                sys.exit(1)
+            else:
+                os.chmod(blink_script_path, 0o750)
+                logging.info(f"Installed ip_blink.sh script at {blink_script_path}")
+                print("ip_blink.sh script installed successfully.")
 
         # Step 5: Create systemd Service
         service_file = os.path.join(mount_point, 'etc/systemd/system/ipblink.service')
@@ -487,6 +512,7 @@ WantedBy=multi-user.target
                 print("Systemd service enabled to run on boot.")
             else:
                 logging.info("Systemd service symlink already exists.")
+                print("Systemd service symlink already exists.")
         except Exception as e:
             logging.error(f"Failed to enable systemd service: {e}")
             print("Failed to enable systemd service. Check logs for details.")
