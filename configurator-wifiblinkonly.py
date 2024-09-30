@@ -28,7 +28,7 @@ def prompt_input(prompt, pattern=None, allow_empty=False):
             print("\nExiting.")
             sys.exit(0)
 
-def confirm_password(prompt="Enter password: ", min_length=8, max_length=63):
+def confirm_password(prompt="Enter password: ", min_length=1, max_length=63):
     while True:
         pwd1 = getpass.getpass(prompt)
         if pwd1.lower() == 'back':
