@@ -67,6 +67,22 @@ def prompt_password(prompt):
             print("\nExiting.")
             sys.exit(0)
 
+def prompt_password_twice(prompt):
+    """
+    Prompt the user to enter a password twice and confirm they match.
+    """
+    while True:
+        pwd1 = prompt_password(prompt)
+        if pwd1 == 'back':
+            return 'back'
+        pwd2 = prompt_password("Confirm WiFi Password: ")
+        if pwd2 == 'back':
+            return 'back'
+        if pwd1 != pwd2:
+            print("Passwords do not match. Please try again.")
+            continue
+        return pwd1
+
 def menu_select(options, prompt="Select an option:"):
     """
     Display a menu of options and prompt the user to select one.
@@ -249,6 +265,7 @@ ExecStart=
 ExecStart=/usr/bin/systemd-networkd-wait-online --timeout={NETWORK_WAIT_TIMEOUT} --interface={WIFI_INTERFACE}
 """)
         logging.info(f"Created systemd-networkd-wait-online.service override at {override_file}")
+        print("Modified systemd-networkd-wait-online.service to wait only for WiFi.")
     except Exception as e:
         logging.error(f"Failed to create network wait override: {e}")
         print("Failed to create network wait override. Check logs for details.")
@@ -281,7 +298,7 @@ def main():
             break
 
         while True:
-            wifi_pwd = prompt_password("Enter WiFi Password: ")
+            wifi_pwd = prompt_password_twice("Enter WiFi Password: ")
             if wifi_pwd == 'back':
                 # Allow going back to re-enter SSID
                 print("To re-enter SSID, please restart the script.")
