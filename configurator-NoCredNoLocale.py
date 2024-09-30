@@ -7,7 +7,6 @@ import shutil
 import re
 import getpass
 import logging
-import importlib.util
 
 # Constants
 SCRIPT_NAME = os.path.basename(__file__)
@@ -18,6 +17,7 @@ NETWORK_WAIT_OVERRIDE_DIR = 'etc/systemd/system/systemd-networkd-wait-online.ser
 NETWORK_WAIT_OVERRIDE_FILE = 'override.conf'
 NETWORK_WAIT_TIMEOUT = '30'  # in seconds
 WIFI_INTERFACE = 'wlan0'  # Adjust as needed
+NETPLAN_CONF_FILENAME = '30-wifis-dhcp.yaml'
 
 # Configure logging to append to the log file
 logging.basicConfig(
@@ -31,26 +31,6 @@ logging.basicConfig(
 if os.geteuid() != 0:
     print("This script must be run as root. Please run with sudo.")
     sys.exit(1)
-
-# Check for PyYAML and handle installation
-try:
-    import yaml
-except ImportError:
-    print("The 'PyYAML' library is required to run this script.")
-    install_choice = input("Do you want to install 'PyYAML' now? (Y/n): ").strip().lower()
-    if install_choice in ['', 'y', 'yes']:
-        try:
-            subprocess.check_call([sys.executable, "-m", "pip", "install", "PyYAML"])
-            import yaml
-            print("'PyYAML' has been installed successfully.")
-            logging.info("'PyYAML' installed successfully.")
-        except subprocess.CalledProcessError as e:
-            print("Failed to install 'PyYAML'. Please install it manually and rerun the script.")
-            logging.error(f"Failed to install PyYAML: {e}")
-            sys.exit(1)
-    else:
-        print("Cannot proceed without 'PyYAML'. Exiting.")
-        sys.exit(1)
 
 def prompt_input(prompt, allow_empty=False, validation_regex=None, error_message="Invalid input."):
     """
@@ -166,12 +146,13 @@ def mount_partitions(device):
         # Find the root partition (commonly last partition)
         lsblk = subprocess.check_output(['lsblk', '-ln', '-o', 'NAME,TYPE,MOUNTPOINT'], universal_newlines=True)
         partitions = []
+        device_basename = os.path.basename(device).replace('/dev/', '')
         for line in lsblk.strip().split('\n'):
             cols = line.strip().split()
             if len(cols) >= 2:
                 name, ptype = cols[:2]
                 mountpoint = cols[2] if len(cols) > 2 else ''
-                if ptype == 'part' and name.startswith(os.path.basename(device).replace('/dev/', '')):
+                if ptype == 'part' and name.startswith(device_basename):
                     partitions.append((name, mountpoint))
         if not partitions:
             logging.error("No partitions found on the device.")
@@ -264,47 +245,79 @@ ExecStart=/usr/bin/systemd-networkd-wait-online --timeout={NETWORK_WAIT_TIMEOUT}
 
 def update_netplan_configuration(netplan_conf_path, ssid, wifi_pwd):
     """
-    Update the Netplan configuration file with the new WiFi settings.
+    Update the Netplan configuration file with the new WiFi settings by directly editing strings.
     """
     try:
         # Backup the existing Netplan configuration
         backup_file(netplan_conf_path)
 
-        # Load existing configuration if it exists
         if os.path.exists(netplan_conf_path):
             with open(netplan_conf_path, 'r') as f:
-                netplan_config = yaml.safe_load(f)
+                lines = f.readlines()
         else:
-            netplan_config = {}
+            lines = []
 
-        # Initialize 'network' key if not present
-        if 'network' not in netplan_config:
-            netplan_config['network'] = {}
+        # Flags to check if 'wifis' and 'wlan0' sections exist
+        wifis_found = False
+        wlan0_found = False
+        access_points_found = False
 
-        # Set 'version' and 'renderer' if not present
-        netplan_config['network'].setdefault('version', 2)
-        netplan_config['network'].setdefault('renderer', 'networkd')
+        # New configuration lines to add or replace
+        new_wlan0_config = [
+            f"  {WIFI_INTERFACE}:\n",
+            f"    dhcp4: true\n",
+            f"    access-points:\n",
+            f"      \"{ssid}\":\n",
+            f"        password: \"{wifi_pwd}\"\n"
+        ]
 
-        # Initialize 'wifis' key if not present
-        if 'wifis' not in netplan_config['network']:
-            netplan_config['network']['wifis'] = {}
+        # Iterate through lines to find and modify the 'wifis' section
+        for idx, line in enumerate(lines):
+            if re.match(r'^\s*wifis:', line):
+                wifis_found = True
+                # Look for 'wlan0' under 'wifis'
+                for j in range(idx + 1, len(lines)):
+                    if re.match(r'^\s+\S+:', lines[j]):
+                        interface_match = re.match(r'^\s+(\S+):', lines[j])
+                        if interface_match:
+                            interface = interface_match.group(1)
+                            if interface == WIFI_INTERFACE:
+                                wlan0_found = True
+                                # Replace existing wlan0 configuration
+                                # Find the start and end of the wlan0 block
+                                start = j
+                                end = j + 1
+                                for k in range(j + 1, len(lines)):
+                                    if re.match(r'^\s+\S+:', lines[k]):
+                                        end = k
+                                        break
+                                # Replace the wlan0 block with new configuration
+                                lines[start:end] = new_wlan0_config
+                                logging.info(f"Updated existing wlan0 configuration in {netplan_conf_path}")
+                                print("Updated existing wlan0 configuration in Netplan.")
+                                break
+                break
 
-        # Configure the WiFi interface
-        wifi_interface_config = {
-            'dhcp4': True,
-            'access-points': {
-                ssid: {
-                    'password': wifi_pwd
-                }
-            }
-        }
-
-        # Merge or update the configuration for 'wlan0'
-        netplan_config['network']['wifis'][WIFI_INTERFACE] = wifi_interface_config
+        if not wifis_found:
+            # If 'wifis' section does not exist, add it
+            lines.append("wifis:\n")
+            lines.extend(new_wlan0_config)
+            logging.info(f"Added new wifis section with wlan0 configuration in {netplan_conf_path}")
+            print("Added new wifis section with wlan0 configuration in Netplan.")
+        elif not wlan0_found:
+            # If 'wlan0' section does not exist under 'wifis', add it
+            # Find the end of 'wifis' section
+            for idx, line in enumerate(lines):
+                if re.match(r'^\s*wifis:', line):
+                    insertion_idx = idx + 1
+                    break
+            lines[insertion_idx:insertion_idx] = new_wlan0_config
+            logging.info(f"Added new wlan0 configuration under existing wifis section in {netplan_conf_path}")
+            print("Added new wlan0 configuration under existing wifis section in Netplan.")
 
         # Write the updated configuration back to the file
         with open(netplan_conf_path, 'w') as f:
-            yaml.safe_dump(netplan_config, f, default_flow_style=False)
+            f.writelines(lines)
 
         logging.info(f"Updated Netplan configuration at {netplan_conf_path}")
         print("Netplan configuration updated successfully.")
@@ -355,7 +368,7 @@ def main():
         # Step 3: Update Netplan Configuration
         netplan_dir = os.path.join(mount_point, 'etc', 'netplan')
         os.makedirs(netplan_dir, exist_ok=True)
-        netplan_conf = os.path.join(netplan_dir, '30-wifis-dhcp.yaml')
+        netplan_conf = os.path.join(netplan_dir, NETPLAN_CONF_FILENAME)
         update_netplan_configuration(netplan_conf, inputs['ssid'], inputs['wifi_pwd'])
 
         # Step 4: Install ip_blink.sh Script
@@ -542,7 +555,9 @@ WantedBy=multi-user.target
             os.makedirs(wants_dir, exist_ok=True)
             service_symlink = os.path.join(wants_dir, 'ipblink.service')
             if not os.path.exists(service_symlink):
-                os.symlink('/etc/systemd/system/ipblink.service', service_symlink)
+                # The target of the symlink should be relative to the mounted filesystem
+                relative_target = '/etc/systemd/system/ipblink.service'
+                os.symlink(relative_target, service_symlink)
                 logging.info(f"Enabled ipblink.service by creating symlink at {service_symlink}")
                 print("Systemd service enabled to run on boot.")
             else:
